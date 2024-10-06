@@ -1,9 +1,11 @@
 import os
 import requests
 from urllib.parse import urlparse
-import argparse
-from PIL import Image, UnidentifiedImageError, ImageEnhance
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image, UnidentifiedImageError
 from io import BytesIO
+import argparse
+import math
 
 # Wikimedia API URL to get images from a specific category
 WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
@@ -155,6 +157,10 @@ def save_standardized_image(image, output_folder, target_size=(1024, 1024), bg_c
     except Exception as e:
         print(f"Error downloading or processing {image['title']}: {str(e)}")
 
+def process_image(image, output_folder, bg_color):
+    """Wrapper function to process images in parallel."""
+    save_standardized_image(image, output_folder, target_size=(1024, 1024), bg_color=bg_color)
+
 # Main function to start the scraping and processing
 def main(category, limit, save, bg_color, min_resolution):
     images = fetch_images_from_category(category, limit, min_resolution)
@@ -166,9 +172,22 @@ def main(category, limit, save, bg_color, min_resolution):
             print(f"URL: {image['url']}")
             print(f"License: {image['license']}")
             print("-" * 60)
-            # If save argument is True, save the standardized images and their descriptions
-            if save:
-                save_standardized_image(image, "output", target_size=(1024, 1024), bg_color=bg_color)
+
+        if save:
+            output_folder = "output"
+            # Determine the number of threads based on 75% of available CPU cores
+            total_cores = os.cpu_count()
+            num_threads = max(1, math.floor(total_cores * 0.75))
+
+            print(f"Using {num_threads} threads for downloading and processing images.")
+
+            # Use a thread pool for downloading and processing images
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = [executor.submit(process_image, image, output_folder, bg_color) for image in images]
+
+                # Collect results (this will raise any exceptions encountered during processing)
+                for future in as_completed(futures):
+                    future.result()
     else:
         print(f"No public domain images found in the category '{category}'.")
 

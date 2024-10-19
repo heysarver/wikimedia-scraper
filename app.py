@@ -5,7 +5,7 @@ from urllib.parse import unquote
 import time
 import json
 
-USER_AGENT = "WikimediaScraper/1.0 (https://github.com/heysarver/wikimedia-scraper; 22250203+heysarver@users.noreply.github.com)"
+USER_AGENT = "WikimediaScraperBot/1.0 (https://github.com/heysarver/wikimedia-scraper)"
 
 def get_files_in_category(category, license_types=["any"], limit=500):
     base_url = "https://commons.wikimedia.org/w/api.php"

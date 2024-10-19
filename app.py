@@ -2,10 +2,11 @@ import requests
 import os
 import argparse
 from urllib.parse import unquote
+import time
 
 USER_AGENT = "WikimediaScraper/1.0 (https://github.com/heysarver/wikimedia-scraper; 22250203+heysarver@users.noreply.github.com)"
 
-def get_files_in_category(category, license_types="any", limit=500):
+def get_files_in_category(category, license_types=["any"], limit=500):
     base_url = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
@@ -13,15 +14,21 @@ def get_files_in_category(category, license_types="any", limit=500):
         "list": "categorymembers",
         "cmtitle": f"Category:{category}",
         "cmtype": "file",
-        "cmlimit": min(500, limit)
+        "cmlimit": min(500, limit)  # API allows max 500 at a time
     }
     headers = {"User-Agent": USER_AGENT}
 
     files = []
     total_fetched = 0
+    api_calls = 0
 
     while total_fetched < limit:
+        api_calls += 1
+        start_time = time.time()
         response = requests.get(base_url, params=params, headers=headers)
+        end_time = time.time()
+        print(f"API call {api_calls} took {end_time - start_time:.2f} seconds")
+        
         data = response.json()
 
         if "query" not in data or "categorymembers" not in data["query"]:
@@ -35,6 +42,8 @@ def get_files_in_category(category, license_types="any", limit=500):
                 if total_fetched >= limit:
                     break
 
+        print(f"Total files found so far: {total_fetched}")
+
         if "continue" in data and total_fetched < limit:
             params["cmcontinue"] = data["continue"]["cmcontinue"]
         else:
@@ -43,6 +52,7 @@ def get_files_in_category(category, license_types="any", limit=500):
     return files
 
 def check_license(file_title, license_types):
+    start_time = time.time()
     base_url = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
@@ -65,8 +75,12 @@ def check_license(file_title, license_types):
         license_short_name = metadata["LicenseShortName"]["value"]
         for license_type in license_types:
             if normalize_string(license_type) in normalize_string(license_short_name):
+                end_time = time.time()
+                print(f"License check for {file_title} took {end_time - start_time:.2f} seconds")
                 return True
 
+    end_time = time.time()
+    print(f"License check for {file_title} took {end_time - start_time:.2f} seconds")
     return False
 
 def normalize_string(s):
@@ -75,6 +89,7 @@ def normalize_string(s):
     return ns
 
 def download_file(file_title, output_dir, min_dimension=None):
+    start_time = time.time()
     base_url = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
@@ -107,7 +122,8 @@ def download_file(file_title, output_dir, min_dimension=None):
     if response.status_code == 200:
         with open(os.path.join(output_dir, file_name), "wb") as f:
             f.write(response.content)
-        print(f"Downloaded: {file_name} (Dimensions: {file_width}x{file_height})")
+        end_time = time.time()
+        print(f"Downloaded: {file_name} (Dimensions: {file_width}x{file_height}) in {end_time - start_time:.2f} seconds")
     else:
         print(f"Failed to download: {file_name}. Status code: {response.status_code}")
 
@@ -138,10 +154,13 @@ def main():
     else:
         print("No minimum dimension set (downloading all files)")
     
+    start_time = time.time()
     files = get_files_in_category(category, license_types, file_limit)
-    print(f"Found {len(files)} files matching criteria")
+    end_time = time.time()
+    print(f"Found {len(files)} files matching criteria in {end_time - start_time:.2f} seconds")
 
-    for file in files:
+    for index, file in enumerate(files, 1):
+        print(f"Processing file {index} of {len(files)}")
         download_file(file, output_dir, min_dimension)
     
     print("Download complete.")

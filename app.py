@@ -102,42 +102,60 @@ def normalize_string(s):
     ns = ''.join(e for e in ns if e.isalnum() or e == "_")
     return ns
 
-def download_file(file_title, output_dir, min_dimension=None):
-    start_time = time.time()
+def check_dimensions_batch(file_titles, min_dimension=None):
     base_url = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
         "format": "json",
         "prop": "imageinfo",
         "iiprop": "url|size",
-        "titles": file_title
+        "titles": "|".join(file_titles)
     }
     headers = {"User-Agent": USER_AGENT}
     
-    response = requests.get(base_url, params=params, headers=headers)
-    data = response.json()
+    start_time = time.time()
+    try:
+        response = requests.get(base_url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        print(f"Error in batch dimension check: {e}")
+        return []
+
+    end_time = time.time()
+    print(f"Batch dimension check for {len(file_titles)} files took {end_time - start_time:.2f} seconds")
+
+    valid_files = []
+    if "query" in data and "pages" in data["query"]:
+        for page in data["query"]["pages"].values():
+            if "imageinfo" in page and page["imageinfo"]:
+                file_info = page["imageinfo"][0]
+                file_width = file_info["width"]
+                file_height = file_info["height"]
+                
+                if min_dimension is None or file_width >= min_dimension or file_height >= min_dimension:
+                    valid_files.append({
+                        "title": page["title"],
+                        "url": file_info["url"],
+                        "width": file_width,
+                        "height": file_height
+                    })
+                else:
+                    print(f"Skipped: {page['title']} (Dimensions: {file_width}x{file_height})")
+
+    return valid_files
+
+def download_file(file_info, output_dir):
+    start_time = time.time()
+    file_name = unquote(file_info["url"].split("/")[-1])
     
-    page = next(iter(data["query"]["pages"].values()))
-    if "imageinfo" not in page:
-        return
-    
-    file_info = page["imageinfo"][0]
-    file_url = file_info["url"]
-    file_width = file_info["width"]
-    file_height = file_info["height"]
-    
-    if min_dimension is not None and file_width < min_dimension and file_height < min_dimension:
-        print(f"Skipped: {file_title} (Dimensions: {file_width}x{file_height})")
-        return
-    
-    file_name = unquote(file_url.split("/")[-1])
-    
-    response = requests.get(file_url, headers=headers)
+    headers = {"User-Agent": USER_AGENT}
+    response = requests.get(file_info["url"], headers=headers)
     if response.status_code == 200:
         with open(os.path.join(output_dir, file_name), "wb") as f:
             f.write(response.content)
         end_time = time.time()
-        print(f"Downloaded: {file_name} (Dimensions: {file_width}x{file_height}) in {end_time - start_time:.2f} seconds")
+        print(f"Downloaded: {file_name} (Dimensions: {file_info['width']}x{file_info['height']}) in {end_time - start_time:.2f} seconds")
     else:
         print(f"Failed to download: {file_name}. Status code: {response.status_code}")
 
@@ -148,6 +166,7 @@ def main():
     parser.add_argument("--output", required=False, help="Output directory", default="output")
     parser.add_argument("--limit", required=False, help="Maximum number of files to scrape", default=500, type=int)
     parser.add_argument("--min-dimension", required=False, help="Minimum width or height of images to download", type=int)
+    parser.add_argument("--batch-size", required=False, help="Number of files to process in each batch", default=50, type=int)
     args = parser.parse_args()
 
     category = args.category
@@ -155,6 +174,7 @@ def main():
     output_dir = args.output
     file_limit = args.limit
     min_dimension = args.min_dimension
+    batch_size = args.batch_size
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -163,6 +183,7 @@ def main():
     print(f"License filter: {', '.join(license_types)}")
     print(f"Output directory: {output_dir}")
     print(f"File limit: {file_limit}")
+    print(f"Batch size: {batch_size}")
     if min_dimension:
         print(f"Minimum dimension: {min_dimension}")
     else:
@@ -173,9 +194,13 @@ def main():
     end_time = time.time()
     print(f"Found {len(files)} files matching criteria in {end_time - start_time:.2f} seconds")
 
-    for index, file in enumerate(files, 1):
-        print(f"Processing file {index} of {len(files)}")
-        download_file(file, output_dir, min_dimension)
+    for i in range(0, len(files), batch_size):
+        batch = files[i:i+batch_size]
+        print(f"Processing batch {i//batch_size + 1} of {(len(files)-1)//batch_size + 1}")
+        valid_files = check_dimensions_batch(batch, min_dimension)
+        
+        for file_info in valid_files:
+            download_file(file_info, output_dir)
     
     print("Download complete.")
 

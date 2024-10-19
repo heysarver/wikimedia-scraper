@@ -1,3 +1,3 @@
 # wikimedia-scraper
 
-scraper for lora training
+Python Wikimedia Scraper

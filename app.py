@@ -1,208 +1,150 @@
-import os
 import requests
-from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from PIL import Image, UnidentifiedImageError
-from io import BytesIO
+import os
 import argparse
-import math
+from urllib.parse import unquote
 
-# Wikimedia API URL to get images from a specific category
-WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
+USER_AGENT = "WikimediaScraper/1.0 (https://github.com/heysarver/wikimedia-scraper; 22250203+heysarver@users.noreply.github.com)"
 
-# Function to fetch images from a category with pagination support
-def fetch_images_from_category(category, limit=50, min_resolution=0):
-    images = []
-    continue_param = None
+def get_files_in_category(category, license_types="any", limit=500):
+    base_url = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "format": "json",
+        "list": "categorymembers",
+        "cmtitle": f"Category:{category}",
+        "cmtype": "file",
+        "cmlimit": min(500, limit)
+    }
+    headers = {"User-Agent": USER_AGENT}
+
+    files = []
     total_fetched = 0
 
     while total_fetched < limit:
-        params = {
-            "action": "query",
-            "generator": "categorymembers",
-            "gcmtitle": f"Category:{category}",
-            "gcmtype": "file",
-            "prop": "imageinfo",
-            "iiprop": "url|extmetadata|size",
-            "format": "json",
-            "gcmlimit": min(50, limit - total_fetched)  # Limit each batch, respecting total limit
-        }
-
-        if continue_param:
-            params["gcmcontinue"] = continue_param
-
-        response = requests.get(WIKIMEDIA_API_URL, params=params)
+        response = requests.get(base_url, params=params, headers=headers)
         data = response.json()
 
-        if "query" in data:
-            pages = data["query"]["pages"]
-            for page_id, page in pages.items():
-                image_info = page.get("imageinfo", [])
-                if image_info:
-                    metadata = image_info[0]["extmetadata"]
-                    license_short_name = metadata.get("LicenseShortName", {}).get("value", "")
-                    width = image_info[0].get("width", 0)
-                    height = image_info[0].get("height", 0)
+        if "query" not in data or "categorymembers" not in data["query"]:
+            print(f"Error in API response: {data}")
+            break
 
-                    # Filter for public domain images (Public domain or CC0 licenses)
-                    # and check if at least one dimension meets the minimum resolution
-                    if ("public domain" in license_short_name.lower() or "cc0" in license_short_name.lower()) and \
-                       (width >= min_resolution or height >= min_resolution):
-                        images.append({
-                            "title": page["title"],
-                            "url": image_info[0]["url"],
-                            "license": license_short_name,
-                            "description": metadata.get("ImageDescription", {}).get("value", "No description available.")
-                        })
-                        total_fetched += 1
+        for item in data["query"]["categorymembers"]:
+            if license_types == ["any"] or check_license(item["title"], license_types):
+                files.append(item["title"])
+                total_fetched += 1
+                if total_fetched >= limit:
+                    break
 
-                        # If we've hit the limit, stop
-                        if total_fetched >= limit:
-                            break
-
-        # Handle pagination
-        if "continue" in data:
-            continue_param = data["continue"]["gcmcontinue"]
+        if "continue" in data and total_fetched < limit:
+            params["cmcontinue"] = data["continue"]["cmcontinue"]
         else:
             break
 
-    return images
+    return files
 
-# Function to get the file extension from the image URL
-def get_file_extension(url):
-    path = urlparse(url).path
-    return os.path.splitext(path)[1]
+def check_license(file_title, license_types):
+    base_url = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "imageinfo",
+        "iiprop": "extmetadata",
+        "titles": file_title
+    }
+    headers = {"User-Agent": USER_AGENT}
+    
+    response = requests.get(base_url, params=params, headers=headers)
+    data = response.json()
+    
+    page = next(iter(data["query"]["pages"].values()))
+    if "imageinfo" not in page:
+        return False
+    
+    metadata = page["imageinfo"][0]["extmetadata"]
+    if "LicenseShortName" in metadata:
+        license_short_name = metadata["LicenseShortName"]["value"]
+        for license_type in license_types:
+            if normalize_string(license_type) in normalize_string(license_short_name):
+                return True
 
-# Function to determine the background color based on the argument
-def get_background_color(bg_color):
-    if bg_color == 'white':
-        return (255, 255, 255), 'RGB'
-    elif bg_color == 'black':
-        return (0, 0, 0), 'RGB'
-    elif bg_color == 'transparent':
-        return (0, 0, 0, 0), 'RGBA'
+    return False
+
+def normalize_string(s):
+    ns = s.lower().replace(" ", "_")
+    ns = ''.join(e for e in ns if e.isalnum() or e == "_")
+    return ns
+
+def download_file(file_title, output_dir, min_dimension=None):
+    base_url = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "imageinfo",
+        "iiprop": "url|size",
+        "titles": file_title
+    }
+    headers = {"User-Agent": USER_AGENT}
+    
+    response = requests.get(base_url, params=params, headers=headers)
+    data = response.json()
+    
+    page = next(iter(data["query"]["pages"].values()))
+    if "imageinfo" not in page:
+        return
+    
+    file_info = page["imageinfo"][0]
+    file_url = file_info["url"]
+    file_width = file_info["width"]
+    file_height = file_info["height"]
+    
+    if min_dimension is not None and file_width < min_dimension and file_height < min_dimension:
+        print(f"Skipped: {file_title} (Dimensions: {file_width}x{file_height})")
+        return
+    
+    file_name = unquote(file_url.split("/")[-1])
+    
+    response = requests.get(file_url, headers=headers)
+    if response.status_code == 200:
+        with open(os.path.join(output_dir, file_name), "wb") as f:
+            f.write(response.content)
+        print(f"Downloaded: {file_name} (Dimensions: {file_width}x{file_height})")
     else:
-        raise ValueError(f"Unsupported background color: {bg_color}")
+        print(f"Failed to download: {file_name}. Status code: {response.status_code}")
 
-# Function to resize proportionally and pad the image to 1024x1024 with specified background
-def resize_and_pad_image(img, target_size=(1024, 1024), bg_color='white'):
-    background_color, mode = get_background_color(bg_color)
-
-    # Resize image proportionally
-    img.thumbnail(target_size, Image.Resampling.LANCZOS)  # Proportional resize using high-quality resampling
-
-    # Create a new background image with the specified color
-    new_img = Image.new(mode, target_size, background_color)
-
-    # Get position to paste the resized image onto the background (center it)
-    paste_position = (
-        (target_size[0] - img.width) // 2,
-        (target_size[1] - img.height) // 2
-    )
-
-    # Paste the resized image onto the background
-    new_img.paste(img, paste_position, img if img.mode == 'RGBA' and bg_color == 'transparent' else None)
-
-    return new_img
-
-def resize_image_conditionally(img):
-    """Resizes the image if it's below 500px or 200px in any dimension."""
-    width, height = img.size
-
-    if width < 200 or height < 200:
-        # Quadruple the size
-        print(f"Image is smaller than 200px in one or both dimensions, quadrupling size.")
-        img = img.resize((width * 4, height * 4), Image.Resampling.NEAREST)
-    elif width < 500 or height < 500:
-        # Double the size
-        print(f"Image is smaller than 500px in one or both dimensions, doubling size.")
-        img = img.resize((width * 2, height * 2), Image.Resampling.NEAREST)
-    
-    return img
-
-def save_standardized_image(image, output_folder, target_size=(1024, 1024), bg_color='white'):
-    # Ensure the output folder exists
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    
-    # Create a valid filename from the image title, removing the original file extension
-    filename = image["title"].replace("File:", "").replace(" ", "_").rsplit(".", 1)[0]
-    image_path = os.path.join(output_folder, f"{filename}.png")  # Save all as .png
-    description_path = os.path.join(output_folder, f"{filename}.txt")
-    
-    try:
-        # Download the image data
-        response = requests.get(image["url"])
-        
-        img = Image.open(BytesIO(response.content))
-
-        # Conditionally resize based on the dimensions of the image
-        img = resize_image_conditionally(img)
-
-        # Convert the image to RGB or RGBA and resize proportionally with specified background padding
-        img = img.convert("RGBA") if bg_color == 'transparent' else img.convert("RGB")
-        img = resize_and_pad_image(img, target_size, bg_color)
-
-        # Save the standardized image as PNG
-        img.save(image_path, format="PNG")
-
-        # Save only the description in the text file
-        with open(description_path, 'w') as handler:
-            handler.write(image['description'])
-
-        print(f"Saved and standardized image: {filename}.png")
-
-    except UnidentifiedImageError:
-        print(f"Failed to process image: {image['title']} from URL: {image['url']} (Unidentified Image)")
-    except Exception as e:
-        print(f"Error downloading or processing {image['title']}: {str(e)}")
-
-def process_image(image, output_folder, bg_color):
-    """Wrapper function to process images in parallel."""
-    save_standardized_image(image, output_folder, target_size=(1024, 1024), bg_color=bg_color)
-
-# Main function to start the scraping and processing
-def main(category, limit, save, bg_color, min_resolution):
-    images = fetch_images_from_category(category, limit, min_resolution)
-    
-    if images:
-        print(f"Found {len(images)} public domain images in the category '{category}':\n")
-        for image in images:
-            print(f"Title: {image['title']}")
-            print(f"URL: {image['url']}")
-            print(f"License: {image['license']}")
-            print("-" * 60)
-
-        if save:
-            output_folder = "output"
-            # Determine the number of threads based on 75% of available CPU cores
-            total_cores = os.cpu_count()
-            num_threads = max(1, math.floor(total_cores * 0.75))
-
-            print(f"Using {num_threads} threads for downloading and processing images.")
-
-            # Use a thread pool for downloading and processing images
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = [executor.submit(process_image, image, output_folder, bg_color) for image in images]
-
-                # Collect results (this will raise any exceptions encountered during processing)
-                for future in as_completed(futures):
-                    future.result()
-    else:
-        print(f"No public domain images found in the category '{category}'.")
-
-if __name__ == "__main__":
-    # Set up argument parsing
-    parser = argparse.ArgumentParser(description='Scrape public domain images from Wikimedia Commons.')
-    parser.add_argument('--min-resolution', type=int, help='Minimum width or height resolution for images', default=0)
-    parser.add_argument('--limit', type=int, default=50, help='Limit the number of images to scrape (default: 50)')
-    parser.add_argument('--save', action='store_true', help='Save and standardize the images to the "output" folder')
-    parser.add_argument('--bg-color', choices=['white', 'black', 'transparent'], default='white', 
-                        help='Background color to use for padding (white, black, or transparent)')
+def main():
+    parser = argparse.ArgumentParser(description="Download images from Wikimedia Commons categories.")
+    parser.add_argument("--category", required=True, help="Category to scrape")
+    parser.add_argument("--license", required=False, help="License(s) to filter by, comma separated", default="any")
+    parser.add_argument("--output", required=False, help="Output directory", default="output")
+    parser.add_argument("--limit", required=False, help="Maximum number of files to scrape", default=500, type=int)
+    parser.add_argument("--min-dimension", required=False, help="Minimum width or height of images to download", type=int)
     args = parser.parse_args()
 
-    # Category to scrape (fixed for this use case)
-    category = "Logos_of_companies"
+    category = args.category
+    license_types = [lt.strip().lower() for lt in args.license.split(",")]
+    output_dir = args.output
+    file_limit = args.limit
+    min_dimension = args.min_dimension
 
-    # Call the main function with arguments
-    main(category, args.limit, args.save, args.bg_color, args.min_resolution)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    print(f"Fetching files from category: {category}")
+    print(f"License filter: {', '.join(license_types)}")
+    print(f"Output directory: {output_dir}")
+    print(f"File limit: {file_limit}")
+    if min_dimension:
+        print(f"Minimum dimension: {min_dimension}")
+    else:
+        print("No minimum dimension set (downloading all files)")
+    
+    files = get_files_in_category(category, license_types, file_limit)
+    print(f"Found {len(files)} files matching criteria")
+
+    for file in files:
+        download_file(file, output_dir, min_dimension)
+    
+    print("Download complete.")
+
+if __name__ == '__main__':
+    main()

@@ -3,6 +3,7 @@ import os
 import argparse
 from urllib.parse import unquote
 import time
+import json
 
 USER_AGENT = "WikimediaScraper/1.0 (https://github.com/heysarver/wikimedia-scraper; 22250203+heysarver@users.noreply.github.com)"
 
@@ -14,7 +15,7 @@ def get_files_in_category(category, license_types=["any"], limit=500):
         "list": "categorymembers",
         "cmtitle": f"Category:{category}",
         "cmtype": "file",
-        "cmlimit": min(500, limit)  # API allows max 500 at a time
+        "cmlimit": min(50, limit)
     }
     headers = {"User-Agent": USER_AGENT}
 
@@ -25,7 +26,7 @@ def get_files_in_category(category, license_types=["any"], limit=500):
     while total_fetched < limit:
         api_calls += 1
         start_time = time.time()
-        response = requests.get(base_url, params=params, headers=headers)
+        response = requests.get(base_url, params=params, headers=headers, timeout=30)
         end_time = time.time()
         print(f"API call {api_calls} took {end_time - start_time:.2f} seconds")
         
@@ -35,12 +36,12 @@ def get_files_in_category(category, license_types=["any"], limit=500):
             print(f"Error in API response: {data}")
             break
 
-        for item in data["query"]["categorymembers"]:
-            if license_types == ["any"] or check_license(item["title"], license_types):
-                files.append(item["title"])
-                total_fetched += 1
-                if total_fetched >= limit:
-                    break
+        batch = [item["title"] for item in data["query"]["categorymembers"]]
+        if license_types != ["any"]:
+            batch = check_licenses_batch(batch, license_types)
+
+        files.extend(batch[:limit - total_fetched])
+        total_fetched += len(batch)
 
         print(f"Total files found so far: {total_fetched}")
 
@@ -49,39 +50,52 @@ def get_files_in_category(category, license_types=["any"], limit=500):
         else:
             break
 
-    return files
+    return files[:limit]
 
-def check_license(file_title, license_types):
-    start_time = time.time()
+def check_licenses_batch(file_titles, license_types):
     base_url = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
         "format": "json",
         "prop": "imageinfo",
         "iiprop": "extmetadata",
-        "titles": file_title
+        "titles": "|".join(file_titles)
     }
     headers = {"User-Agent": USER_AGENT}
     
-    response = requests.get(base_url, params=params, headers=headers)
-    data = response.json()
-    
-    page = next(iter(data["query"]["pages"].values()))
-    if "imageinfo" not in page:
-        return False
-    
-    metadata = page["imageinfo"][0]["extmetadata"]
-    if "LicenseShortName" in metadata:
-        license_short_name = metadata["LicenseShortName"]["value"]
-        for license_type in license_types:
-            if normalize_string(license_type) in normalize_string(license_short_name):
-                end_time = time.time()
-                print(f"License check for {file_title} took {end_time - start_time:.2f} seconds")
-                return True
+    start_time = time.time()
+    try:
+        response = requests.get(base_url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        print(f"Response status code: {response.status_code}")
+        print(f"Response headers: {response.headers}")
+        
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            print(f"JSONDecodeError: {e}")
+            print(f"Response content: {response.text[:1000]}...")
+            return []
+        
+    except requests.RequestException as e:
+        print(f"Request failed: {e}")
+        return []
 
     end_time = time.time()
-    print(f"License check for {file_title} took {end_time - start_time:.2f} seconds")
-    return False
+    print(f"Batch license check for {len(file_titles)} files took {end_time - start_time:.2f} seconds")
+
+    valid_files = []
+    if "query" in data and "pages" in data["query"]:
+        for page in data["query"]["pages"].values():
+            if "imageinfo" in page and "extmetadata" in page["imageinfo"][0]:
+                metadata = page["imageinfo"][0]["extmetadata"]
+                if "LicenseShortName" in metadata:
+                    license_short_name = metadata["LicenseShortName"]["value"]
+                    if any(normalize_string(lt) in normalize_string(license_short_name) for lt in license_types):
+                        valid_files.append(page["title"])
+
+    return valid_files
 
 def normalize_string(s):
     ns = s.lower().replace(" ", "_")
